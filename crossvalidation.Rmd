@@ -5,26 +5,153 @@ date: "2025-11-11"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+Load key packages
+```{r}
+library(tidyverse)
+library(modelr)
+library(mgcv)
+library(p8105.datasets)
+
+set.seed(1)
 ```
 
-## R Markdown
+## Cross Validation
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+Load LIDAR
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+Simulated example. The code chunk below imports data that is non-linear and shows increasing variance as the predictor increases. I like to use this setting because “model complexity” is easiest for me to understand when I can see it. 
+```{r}
+data("lidar")
 
-```{r cars}
-summary(cars)
+lidar_df = 
+  lidar |> 
+  as_tibble() |>
+  mutate(id = row_number())
+
+lidar_df |> 
+  ggplot(aes(x = range, y = logratio)) + 
+  geom_point()
 ```
 
-## Including Plots
+I’ll split this data into training and test sets (using anti_join!!), and replot showing the split. Our goal will be to use the training data (in black) to build candidate models, and then see how those models predict in the testing data (in red).
+```{r}
+train_df = sample_frac(lidar_df, size = .8)
+test_df = anti_join(lidar_df, train_df, by = "id")
 
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+ggplot(train_df, aes(x = range, y = logratio)) + 
+  geom_point() + 
+  geom_point(data = test_df, color = "red")
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Fit three three models to the training data. Throughout, I’m going to use mgcv::gam for non-linear models – this is my go-to package for “additive models”, and I much prefer it to e.g. polynomial models. For today, you don’t have to know what this means, how gam works, or why I prefer it – just know that we’re putting smooth lines through data clouds, and we can control how smooth we want the fit to be.
+
+The three models below have very different levels of complexity and aren’t nested, so testing approaches for nested model don’t apply.
+
+```{r}
+linear_mod = lm(logratio ~ range, data = train_df)
+smooth_mod = mgcv::gam(logratio ~ s(range), data = train_df)
+wiggly_mod = mgcv::gam(logratio ~ s(range, k = 30), sp = 10e-6, data = train_df)
+```
+
+To understand what the models are doing: 
+
+Smooth
+```{r}
+train_df |> 
+  add_predictions(smooth_mod) |> 
+  ggplot(aes(x = range, y = logratio)) + 
+  geom_point() + 
+  geom_line(aes(y = pred), color = "red")
+```
+
+Wiggly
+```{r}
+train_df |> 
+  add_predictions(wiggly_mod) |> 
+  ggplot(aes(x = range, y = logratio)) + 
+  geom_point() + 
+  geom_line(aes(y = pred), color = "red")
+```
+
+I can also use the handy modelr::gather_predictions function – this is, essentially, a short way of adding predictions for several models to a data frame and then “pivoting” so the result is a tidy, “long” dataset that’s easily plottable.
+```{r}
+train_df |> 
+  gather_predictions(linear_mod, smooth_mod, wiggly_mod) |> 
+  mutate(model = fct_inorder(model)) |> 
+  ggplot(aes(x = range, y = logratio)) + 
+  geom_point() + 
+  geom_line(aes(y = pred), color = "red") + 
+  facet_wrap(~model)
+```
+
+Try computing RMSEs
+
+```{r}
+rmse(linear_mod, test_df)
+rmse(smooth_mod, test_df)
+rmse(wiggly_mod, test_df)
+```
+
+## ITERATE
+
+```{r}
+cv_df =
+  crossv_mc(lidar_df, n = 100) |> 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  )
+```
+
+Did this work? Yes!
+
+```{r}
+cv_df |>  pull(train) |> nth(1)
+```
+
+
+Let's fit models over and over. Could use function too
+```{r}
+cv_df = 
+cv_df |> 
+  mutate(
+    linear_fits = map(train, \(df) lm(logratio ~ range, data = df)),
+    smooth_fits = map(train, \(df) mgcv::gam(logratio ~ s(range), data = df)),
+    wiggly_fits = map(train, \(df) mgcv::gam(logratio ~ s(range, k=50), sp = 10e-8, data = df)),
+  ) |> 
+  mutate( #needs both model being fit and training dataset
+    rmse_linear = map2_dbl(linear_fits, test, rmse),
+    rmse_smooth = map2_dbl(smooth_fits, test, rmse),
+    rmse_wiggly = map2_dbl(wiggly_fits, test, rmse)
+  )
+```
+
+
+Let's try to view better. Care about MSE as shows model best fit
+
+```{r}
+cv_df |> 
+  select(starts_with("rmse")) |> 
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse"
+  ) |> 
+  ggplot(aes(x=model, y=rmse)) +
+  geom_violin()
+```
+
+## Use real world example
+```{r}
+child_growth = read_csv("data/nepalese_children.csv")
+```
+
+```{r}
+child_growth |> 
+  ggplot(aes(x = weight, y = armc)) + 
+  geom_point(alpha = .5)
+```
+
+
+
