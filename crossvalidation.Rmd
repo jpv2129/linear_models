@@ -129,6 +129,8 @@ cv_df |>
 
 Let's try to view better. Care about MSE as shows model best fit
 
+MSE: measures the average squared difference between the model’s predicted values and the actual observed values.
+
 ```{r}
 cv_df |> 
   select(starts_with("rmse")) |> 
@@ -146,12 +148,95 @@ cv_df |>
 ```{r}
 child_growth = read_csv("data/nepalese_children.csv")
 ```
+Let's show the models we might use.
+
+```{r}
+growth_df = 
+  child_growth |> 
+  mutate(
+    weight_cp7 = (weight > 7) * (weight - 7)
+  )
+```
+
+Weight vs. arm_c
 
 ```{r}
 child_growth |> 
   ggplot(aes(x = weight, y = armc)) + 
   geom_point(alpha = .5)
 ```
+
+
+
+Let's fit three models
+```{r}
+linear_mod = lm(armc ~ weight, growth_df)
+pwl_mod = lm(armc ~ weight +weight_cp7, growth_df)
+smooth_mod = mgcv::gam(armc ~ s(weight), data = growth_df)
+```
+
+```{r}
+growth_df |> 
+  add_predictions(linear_mod) |> 
+  ggplot(aes(x=weight, y = armc)) +
+  geom_point(alpha = .5) +
+  geom_line(aes(y=pred), color ="red")
+
+growth_df |> 
+  add_predictions(pwl_mod) |> 
+  ggplot(aes(x=weight, y = armc)) +
+  geom_point(alpha = .5) +
+  geom_line(aes(y=pred), color ="red")
+
+growth_df |> 
+  add_predictions(smooth_mod) |> 
+  ggplot(aes(x=weight, y = armc)) +
+  geom_point(alpha = .5) +
+  geom_line(aes(y=pred), color ="red")
+```
+Now cross validate!
+
+```{r}
+cv_df = 
+  crossv_mc(growth_df, n = 100) |> 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  )
+```
+
+
+```{r}
+cv_df = 
+  cv_df |> 
+  mutate(
+    linear_mod = map(train, \(df) lm(armc ~ weight, data = df)),
+    pwl_mod    = map(train, \(df) lm(armc ~ weight + weight_cp7, data = df)),
+    smooth_mod = map(train, \(df) mgcv::gam(armc ~ s(weight), data = df))
+  ) |> 
+  mutate(
+    rmse_linear = map2_dbl(linear_mod, test, rmse),
+    rmse_pwl    = map2_dbl(pwl_mod, test, rmse),
+    rmse_smooth = map2_dbl(smooth_mod, test, rmse)
+  )
+```
+
+Create my boxplots!
+
+```{r}
+cv_df |> 
+  select(starts_with("rmse")) |> 
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) |> 
+  ggplot(aes(x = model, y = rmse)) + 
+  geom_violin()
+```
+
+
 
 
 
